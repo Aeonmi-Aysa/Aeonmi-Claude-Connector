@@ -1,196 +1,230 @@
-"""Tests for the QUBE executor."""
+"""Tests for the QUBE statevector executor."""
 
-import pytest
+import unittest
 
-from aeonmi_claude_connector.qube_executor import (
-    QBottom,
-    QConstructor,
-    QEntangled,
-    QFlow,
-    QInfinity,
-    QScalar,
-    QState,
-    QSuperposition,
-    execute,
-)
+from aeonmi_claude_connector.qube_executor import ExecutionResult, diagram, execute
 
 
 # ---------------------------------------------------------------------------
-# Basic execution
+# Pure state execution
 # ---------------------------------------------------------------------------
 
-class TestExecuteBindings:
-    def test_infinity_binding(self):
-        result = execute("λ x ≔ ∞")
-        assert "x" in result.bindings
-        assert "∞" in result.bindings["x"]
+class TestPureStates(unittest.TestCase):
+    def test_zero_state_collapses_to_zero(self):
+        for seed in range(10):
+            result = execute("state q = |0⟩\ncollapse q -> r\nlog(r)", seed=seed)
+            self.assertEqual(result.measurements["r"], 0)
 
-    def test_number_binding(self):
-        result = execute("λ n ≔ 42")
-        assert "n" in result.bindings
-        assert "42" in result.bindings["n"]
+    def test_one_state_collapses_to_one(self):
+        for seed in range(10):
+            result = execute("state q = |1⟩\ncollapse q -> r\nlog(r)", seed=seed)
+            self.assertEqual(result.measurements["r"], 1)
 
-    def test_string_binding(self):
-        result = execute('λ s ≔ "hello"')
-        assert "s" in result.bindings
-        assert "hello" in result.bindings["s"]
-
-    def test_bottom_binding(self):
-        result = execute("λ x ≔ ⊥")
-        assert "x" in result.bindings
-        assert "⊥" in result.bindings["x"]
+    def test_result_type_is_execution_result(self):
+        result = execute("state q = |0⟩\ncollapse q -> r")
+        self.assertIsInstance(result, ExecutionResult)
 
 
-class TestQuantumState:
-    def test_psi_state(self):
-        result = execute("|ψ⟩")
-        assert len(result.outputs) == 1
-        assert "ψ" in result.outputs[0]
+# ---------------------------------------------------------------------------
+# Hadamard gate
+# ---------------------------------------------------------------------------
 
-    def test_string_state(self):
-        result = execute('|"hi"⟩')
-        assert len(result.outputs) == 1
-        assert "hi" in result.outputs[0]
+class TestHadamard(unittest.TestCase):
+    SOURCE = "state q = |0⟩\napply H -> q\ncollapse q -> r\nassert r ∈ {0, 1}\nlog(r)"
 
+    def test_outcome_in_zero_or_one(self):
+        for seed in range(20):
+            result = execute(self.SOURCE, seed=seed)
+            self.assertIn(result.measurements["r"], {0, 1})
 
-class TestEntanglement:
-    def test_entangle_two_states(self):
-        result = execute("λ pair ≔ |ψ⟩ ⊗ ∞")
-        assert "pair" in result.bindings
-        assert "⊗" in result.bindings["pair"]
+    def test_both_outcomes_occur(self):
+        outcomes = set()
+        for seed in range(100):
+            result = execute(self.SOURCE, seed=seed)
+            outcomes.add(result.measurements["r"])
+        self.assertEqual(outcomes, {0, 1})
 
-    def test_entangle_numbers(self):
-        result = execute("1 ⊗ 2")
-        assert len(result.outputs) == 1
-        assert "⊗" in result.outputs[0]
-
-
-class TestSuperposition:
-    def test_superpose_two_states(self):
-        result = execute('|"a"⟩ ⊕ |"b"⟩')
-        assert len(result.outputs) == 1
-        assert "⊕" in result.outputs[0]
-
-    def test_superpose_normalises(self):
-        # Superposing three items should normalise weights to sum=1
-        result = execute('|"a"⟩ ⊕ |"b"⟩ ⊕ |"c"⟩')
-        assert len(result.outputs) == 1
+    def test_no_assertion_failures(self):
+        result = execute(self.SOURCE, seed=42)
+        self.assertEqual(result.assertion_failures, [])
 
 
-class TestCollapse:
-    def test_collapse_deterministic(self):
-        # With a fixed seed the result should be reproducible
-        r1 = execute('↯ (|"yes"⟩ ⊕ |"no"⟩)', seed=0)
-        r2 = execute('↯ (|"yes"⟩ ⊕ |"no"⟩)', seed=0)
-        assert r1.collapsed_values == r2.collapsed_values
+# ---------------------------------------------------------------------------
+# X gate (bit flip)
+# ---------------------------------------------------------------------------
 
-    def test_collapse_random_is_one_of_branches(self):
-        for _ in range(20):
-            result = execute('↯ (|"yes"⟩ ⊕ |"no"⟩)')
-            assert result.collapsed_values[0] in ("'yes'", "'no'")
+class TestXGate(unittest.TestCase):
+    SOURCE = "state q = |0⟩\napply X -> q\ncollapse q -> r\nassert r == 1\nlog(r)"
 
-    def test_collapse_single_state(self):
-        result = execute('↯ |"hello"⟩')
-        assert result.collapsed_values[0] == "'hello'"
+    def test_x_flips_to_one(self):
+        for seed in range(10):
+            result = execute(self.SOURCE, seed=seed)
+            self.assertEqual(result.measurements["r"], 1)
 
-
-class TestEvolution:
-    def test_evolution_creates_evolution_value(self):
-        result = execute("λ loop ≔ ⟳ |ψ⟩")
-        assert "loop" in result.bindings
-        assert "⟳" in result.bindings["loop"]
+    def test_no_assertion_failures(self):
+        result = execute(self.SOURCE, seed=0)
+        self.assertEqual(result.assertion_failures, [])
 
 
-class TestGlyphLock:
-    def test_glyph_lock_constructor(self):
-        result = execute("λ brain ≔ ◈ Æ(∞)")
-        assert "brain" in result.bindings
+# ---------------------------------------------------------------------------
+# CNOT / Bell state
+# ---------------------------------------------------------------------------
 
-    def test_glyph_lock_plain(self):
-        result = execute("λ x ≔ ◈ |ψ⟩")
-        assert "x" in result.bindings
+class TestCNOT(unittest.TestCase):
+    BELL = (
+        "state q0 = |0⟩\n"
+        "state q1 = |0⟩\n"
+        "apply H -> q0\n"
+        "apply CNOT(q0, q1)\n"
+        "collapse q0 -> r0\n"
+        "collapse q1 -> r1\n"
+        "assert r0 ∈ {0, 1}\n"
+        "assert r1 ∈ {0, 1}\n"
+        "log(r0)\n"
+        "log(r1)"
+    )
 
+    def test_bell_both_same(self):
+        """Bell pair always collapses to the same bit."""
+        for seed in range(30):
+            result = execute(self.BELL, seed=seed)
+            self.assertEqual(result.measurements["r0"], result.measurements["r1"],
+                             f"seed={seed}: r0={result.measurements['r0']}, r1={result.measurements['r1']}")
 
-class TestConstructor:
-    def test_constructor_no_args(self):
-        result = execute("Æ()")
-        assert len(result.outputs) == 1
-        assert "Æ" in result.outputs[0]
+    def test_bell_no_assertion_failures(self):
+        result = execute(self.BELL, seed=7)
+        self.assertEqual(result.assertion_failures, [])
 
-    def test_constructor_with_infinity(self):
-        result = execute("Æ(∞)")
-        assert "Æ" in result.outputs[0]
-
-    def test_constructor_locked(self):
-        result = execute("◈ Æ(∞)")
-        assert "◈" in result.outputs[0]
-
-
-class TestFlowPipe:
-    def test_simple_flow(self):
-        result = execute("|ψ⟩ ↝ ∞")
-        assert len(result.outputs) == 1
-        assert "↝" in result.outputs[0]
-
-    def test_chained_flow(self):
-        result = execute("|ψ⟩ ↝ ∞ ↝ ∞")
-        assert len(result.outputs) == 1
+    def test_bell_has_two_outputs(self):
+        result = execute(self.BELL, seed=0)
+        self.assertEqual(len(result.outputs), 2)
 
 
-class TestEntropyCredit:
-    def test_entropy_accumulates(self):
-        result = execute("⧖ 10\n⧖ 5")
-        assert result.entropy_credits == pytest.approx(15.0)
+# ---------------------------------------------------------------------------
+# Assert pass / fail
+# ---------------------------------------------------------------------------
 
-    def test_entropy_in_binding(self):
-        result = execute("λ budget ≔ ⧖ 42")
-        assert result.entropy_credits == pytest.approx(42.0)
+class TestAssertPass(unittest.TestCase):
+    def test_assert_pass_not_in_failures(self):
+        src = "state q = |1⟩\ncollapse q -> r\nassert r == 1"
+        result = execute(src, seed=0)
+        self.assertEqual(result.assertion_failures, [])
 
-
-class TestIdentifierLookup:
-    def test_bound_identifier_is_resolved(self):
-        result = execute("λ x ≔ ∞\nx")
-        # 'x' should resolve to ∞ and appear in outputs
-        assert any("∞" in o for o in result.outputs)
-
-    def test_unbound_identifier_raises(self):
-        with pytest.raises(NameError):
-            execute("undefinedVar")
+    def test_assert_member_pass(self):
+        src = "state q = |0⟩\ncollapse q -> r\nassert r ∈ {0, 1}"
+        result = execute(src, seed=0)
+        self.assertEqual(result.assertion_failures, [])
 
 
-class TestBuiltinCalls:
-    def test_sqrt(self):
-        result = execute("sqrt(9)")
-        assert "3" in result.outputs[0]
+class TestAssertFail(unittest.TestCase):
+    def test_assert_fail_recorded(self):
+        # |0⟩ always collapses to 0, so assert r == 1 should fail
+        src = "state q = |0⟩\ncollapse q -> r\nassert r == 1"
+        result = execute(src, seed=0)
+        self.assertEqual(len(result.assertion_failures), 1)
+        self.assertIn("FAIL", result.assertion_failures[0])
 
-    def test_abs_negative(self):
-        result = execute("abs(-5)")
-        assert "5" in result.outputs[0]
+    def test_assert_member_fail(self):
+        # |1⟩ always collapses to 1, so assert r ∈ {0} should fail
+        src = "state q = |1⟩\ncollapse q -> r\nassert r ∈ {0}"
+        result = execute(src, seed=0)
+        self.assertEqual(len(result.assertion_failures), 1)
 
 
-class TestExamples:
-    """Ensure all built-in examples execute without errors."""
+# ---------------------------------------------------------------------------
+# Log output
+# ---------------------------------------------------------------------------
 
-    def test_root_soul(self):
-        result = execute("λ RootSoul ≔ |ψ⟩ ⊗ ∞")
-        assert "RootSoul" in result.bindings
+class TestLog(unittest.TestCase):
+    def test_log_appears_in_outputs(self):
+        src = "state q = |0⟩\ncollapse q -> r\nlog(r)"
+        result = execute(src, seed=0)
+        self.assertEqual(len(result.outputs), 1)
+        self.assertIn("0", result.outputs[0])
 
-    def test_superposed_greeting(self):
-        result = execute('λ greeting ≔ |"Hello"⟩ ⊕ |"Aysa"⟩')
-        assert "greeting" in result.bindings
+    def test_print_alias(self):
+        src = "state q = |1⟩\ncollapse q -> r\nprint(r)"
+        result = execute(src, seed=0)
+        self.assertEqual(len(result.outputs), 1)
+        self.assertIn("1", result.outputs[0])
 
-    def test_collapsed_greeting(self):
-        result = execute('λ greeting ≔ |"Hello"⟩ ⊕ |"Aysa"⟩\n↯ greeting', seed=1)
-        assert result.collapsed_values
+    def test_multiple_logs(self):
+        src = "state q0 = |0⟩\nstate q1 = |1⟩\ncollapse q0 -> r0\ncollapse q1 -> r1\nlog(r0)\nlog(r1)"
+        result = execute(src, seed=0)
+        self.assertEqual(len(result.outputs), 2)
 
-    def test_locked_constructor(self):
-        result = execute("λ brain ≔ ◈ Æ(∞)")
-        assert "brain" in result.bindings
 
-    def test_self_evolving_flow(self):
-        result = execute("λ soul ≔ |ψ⟩\nλ loop ≔ soul ↝ ⟳ soul")
-        assert "loop" in result.bindings
+# ---------------------------------------------------------------------------
+# Circuit diagram
+# ---------------------------------------------------------------------------
 
-    def test_entropy_budget(self):
-        result = execute("λ budget ≔ ⧖ 42")
-        assert result.entropy_credits == pytest.approx(42.0)
+class TestDiagram(unittest.TestCase):
+    BELL = (
+        "state q0 = |0⟩\n"
+        "state q1 = |0⟩\n"
+        "apply H -> q0\n"
+        "apply CNOT(q0, q1)\n"
+        "collapse q0 -> r0\n"
+        "collapse q1 -> r1"
+    )
+
+    def test_diagram_non_empty(self):
+        d = diagram(self.BELL)
+        self.assertIsInstance(d, str)
+        self.assertGreater(len(d), 0)
+
+    def test_diagram_contains_qubit_names(self):
+        d = diagram(self.BELL)
+        self.assertIn("q0", d)
+        self.assertIn("q1", d)
+
+    def test_single_qubit_diagram(self):
+        d = diagram("state q = |0⟩\napply H -> q\ncollapse q -> r")
+        self.assertIn("q", d)
+
+    def test_no_qubits(self):
+        d = diagram("log(42)")
+        self.assertIn("no qubits", d.lower())
+
+
+# ---------------------------------------------------------------------------
+# Deterministic seed
+# ---------------------------------------------------------------------------
+
+class TestSeed(unittest.TestCase):
+    SOURCE = "state q = |0⟩\napply H -> q\ncollapse q -> r"
+
+    def test_same_seed_same_outcome(self):
+        r1 = execute(self.SOURCE, seed=12345)
+        r2 = execute(self.SOURCE, seed=12345)
+        self.assertEqual(r1.measurements["r"], r2.measurements["r"])
+
+    def test_different_seeds_can_differ(self):
+        outcomes = set()
+        for seed in range(100):
+            r = execute(self.SOURCE, seed=seed)
+            outcomes.add(r.measurements["r"])
+        self.assertEqual(outcomes, {0, 1})
+
+
+# ---------------------------------------------------------------------------
+# circuit_steps
+# ---------------------------------------------------------------------------
+
+class TestCircuitSteps(unittest.TestCase):
+    def test_steps_non_empty(self):
+        src = "state q = |0⟩\napply H -> q\ncollapse q -> r"
+        result = execute(src, seed=0)
+        self.assertGreater(len(result.circuit_steps), 0)
+
+    def test_to_dict_keys(self):
+        src = "state q = |0⟩\ncollapse q -> r"
+        d = execute(src, seed=0).to_dict()
+        self.assertIn("outputs", d)
+        self.assertIn("measurements", d)
+        self.assertIn("assertion_failures", d)
+        self.assertIn("circuit_steps", d)
+
+
+if __name__ == "__main__":
+    unittest.main()
